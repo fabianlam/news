@@ -1,9 +1,10 @@
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 import threading
 import time
 from datetime import datetime
 import socket
 import feedparser # pip install feedparser
+import requests
 # ────────────────────────────────────────────────
 # mDNS / Zeroconf advertisement (for auto-discovery)
 # ────────────────────────────────────────────────
@@ -55,6 +56,7 @@ if Zeroconf:
 app = Flask(__name__)
 latest_data = {}
 last_update_str = "Not yet fetched"
+is_updating = False
 # Updated RSS feed URLs (using official rthk.hk domain)
 rss_urls = {
     "本港新聞": "https://rthk.hk/rthk/news/rss/c_expressnews_clocal.xml",
@@ -63,7 +65,8 @@ rss_urls = {
     "財經新聞": "https://rthk.hk/rthk/news/rss/c_expressnews_cfinance.xml"
 }
 def fetch_news():
-    global last_update_str
+    global last_update_str, is_updating
+    is_updating = True
     for category, url in rss_urls.items():
         try:
             feed = feedparser.parse(url)
@@ -81,6 +84,17 @@ def fetch_news():
         except Exception as e:
             print(f"Error fetching {category}: {e}")
     last_update_str = datetime.now().strftime("%Y/%m/%d %H:%M")
+    is_updating = False
+
+    # Push to LED panel
+    try:
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        headlines = {cat: [item['title'] for item in latest_data[cat]] for cat in latest_data}
+        payload = {"timestamp": timestamp, "headlines": headlines}
+        response = requests.post("http://192.168.1.120/notify", json=payload)
+        print("Pushed to panel:", response.status_code)
+    except Exception as e:
+        print("Push failed:", e)
 # ────────────────────────────────────────────────
 # Endpoints
 # ────────────────────────────────────────────────
@@ -114,6 +128,9 @@ def get_specific_news(category, index):
 @app.route('/all_news')
 def get_all_news():
     """Return all headlines with timestamp"""
+    global is_updating
+    if is_updating:
+        return jsonify({"status": "updating"})
     if not latest_data:
         return jsonify({"error": "No data available yet"}), 503
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
