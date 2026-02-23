@@ -70,3 +70,4 @@ if __name__ == '__main__':
     updater_thread.daemon = True
     updater_thread.start()
     app.run(host='0.0.0.0', port=5050)
+
