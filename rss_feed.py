@@ -9,9 +9,9 @@ from flask import Flask, jsonify
 
 app = Flask(__name__)
 
-LED_URL = "http://192.168.1.120/notify"  # LED panel's notify endpoint (use mDNS if preferred: "http://lednews.local/notify")
-current_data = {"status": "updating"}  # Initial state
-last_hash = None  # Force push on startup
+LED_URL = "http://192.168.1.120/notify"        # ← change if you use mDNS
+current_data = {"status": "updating"}
+last_hash = None                               # Force push on first start
 
 def fetch_rss(url):
     feed = feedparser.parse(url)
@@ -21,52 +21,50 @@ def update_news():
     global current_data, last_hash
     headlines = {}
     categories = {
-        "本港新聞": "https://rthk.hk/rthk/news/rss/c_expressnews_clocal.xml",
-        "內地新聞": "https://rthk.hk/rthk/news/rss/c_expressnews_greaterchina.xml",
-        "國際新聞": "https://rthk.hk/rthk/news/rss/c_expressnews_cinternational.xml",
-        "財經新聞": "https://rthk.hk/rthk/news/rss/c_expressnews_cfinance.xml"
+        "本港新聞":   "https://rthk.hk/rthk/news/rss/c_expressnews_clocal.xml",
+        "內地新聞":   "https://rthk.hk/rthk/news/rss/c_expressnews_greaterchina.xml",
+        "國際新聞":   "https://rthk.hk/rthk/news/rss/c_expressnews_cinternational.xml",
+        "財經新聞":   "https://rthk.hk/rthk/news/rss/c_expressnews_cfinance.xml"
     }
 
     for label, url in categories.items():
         titles = fetch_rss(url)
-        # Pad to exactly 10 headlines if fewer are available
         while len(titles) < 10:
             titles.append("")
         headlines[label] = titles
 
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    data = {"timestamp": timestamp, "headlines": headlines}
-    data_str = json.dumps(data, sort_keys=True, ensure_ascii=False)
-    current_hash = hashlib.sha256(data_str.encode('utf-8')).hexdigest()
 
-    # Push if changed or on startup (last_hash is None initially)
+    # ──────────────────────── KEY FIX ────────────────────────
+    # Hash ONLY the headlines → timestamp no longer triggers a push
+    headlines_str = json.dumps(headlines, sort_keys=True, ensure_ascii=False)
+    current_hash = hashlib.sha256(headlines_str.encode('utf-8')).hexdigest()
+
+    data = {"timestamp": timestamp, "headlines": headlines}
+
+    # Push only when real news changed or first boot
     if last_hash is None or last_hash != current_hash:
-        print("News content changed or server startup - pushing to LED panel")
+        print("News content changed or server startup → pushing to LED")
         try:
-            response = requests.post(LED_URL, json=data)
-            if response.status_code == 200:
-                print("Push successful")
-            else:
-                print(f"Push failed with status: {response.status_code}")
+            r = requests.post(LED_URL, json=data, timeout=5)
+            print("Push OK" if r.status_code == 200 else f"Push failed {r.status_code}")
         except Exception as e:
-            print(f"Error during push: {e}")
+            print("Push error:", e)
         last_hash = current_hash
 
     current_data = data
 
 def news_updater():
     global last_hash
-    last_hash = None  # Ensure initial push on server startup
+    last_hash = None
     while True:
         update_news()
-        time.sleep(60)  # Check every minute
+        time.sleep(60)
 
 @app.route('/all_news')
 def all_news():
     return jsonify(current_data)
 
 if __name__ == '__main__':
-    updater_thread = threading.Thread(target=news_updater)
-    updater_thread.daemon = True
-    updater_thread.start()
+    threading.Thread(target=news_updater, daemon=True).start()
     app.run(host='0.0.0.0', port=5050)
