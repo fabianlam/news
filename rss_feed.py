@@ -20,12 +20,12 @@ def fetch_rss(url):
 def update_news():
     global current_data, last_hash
     headlines = {}
-    categories = {
-        "本港新聞": "https://news.rthk.hk/rthk/ch/news/local/rss.xml",
-        "內地新聞": "https://news.rthk.hk/rthk/ch/news/greaterchina/rss.xml",
-        "國際新聞": "https://news.rthk.hk/rthk/ch/news/international/rss.xml",
-        "財經新聞": "https://news.rthk.hk/rthk/ch/news/finance/rss.xml"
-    }
+categories = {
+    "本港新聞": "https://rthk.hk/rthk/news/rss/c_expressnews_clocal.xml",
+    "內地新聞": "https://rthk.hk/rthk/news/rss/c_expressnews_greaterchina.xml",
+    "國際新聞": "https://rthk.hk/rthk/news/rss/c_expressnews_cinternational.xml",
+    "財經新聞": "https://rthk.hk/rthk/news/rss/c_expressnews_cfinance.xml"
+}
 
     for label, url in categories.items():
         titles = fetch_rss(url)
@@ -70,4 +70,5 @@ if __name__ == '__main__':
     updater_thread.daemon = True
     updater_thread.start()
     app.run(host='0.0.0.0', port=5050)
+
 
