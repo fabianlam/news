@@ -1,120 +1,70 @@
-import asyncio
 import json
 import datetime
 import time
+import threading
 import hashlib
 import feedparser
-import traceback
-from bleak import BleakScanner, BleakClient
-from bleak.exc import BleakError, BleakDeviceNotFoundError
+import requests
+from flask import Flask, jsonify
 
-# ==================== CONFIG ====================
-ESP32_MAC = "80:B5:4E:D7:14:25"          # Your ESP32 MAC
-ESP32_NAME = "LEDNewsDisplay"
+app = Flask(__name__)
 
-SERVICE_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
-CHAR_UUID    = "beb5483e-36e1-4688-b7f5-ea07361b26a8"
+LED_URL = "http://192.168.1.120/notify"        # ← change if you use mDNS
+current_data = {"status": "updating"}
+last_hash = None                               # Force push on first start
 
-MIN_PUSH_INTERVAL = 300   # 5 minutes
-# ===============================================
-
-last_hash = None
-last_push_time = 0
-
-
-def fetch_rss(url: str):
+def fetch_rss(url):
     feed = feedparser.parse(url)
-    titles = [entry.title for entry in feed.entries[:10]]
-    while len(titles) < 10:
-        titles.append("")
-    return titles
+    return [entry.title for entry in feed.entries[:10]]
 
-
-async def discover_and_connect():
-    print(f"🔍 Scanning for {ESP32_NAME}...")
-    devices = await BleakScanner.discover(timeout=10)
-    for d in devices:
-        if d.address.upper() == ESP32_MAC.upper() or (d.name and ESP32_NAME in (d.name or "")):
-            print(f"✅ Found {d.name} | {d.address}")
-            return d
-    print("❌ ESP32 not found. Check power, range, advertising.")
-    return None
-
-
-async def push_to_esp32(data: dict):
-    global last_push_time
-    device = await discover_and_connect()
-    if not device:
-        return False
-
-    try:
-        async with BleakClient(device) as client:
-            # === CRITICAL: Negotiate higher MTU ===
-            print(f"Connected. Current MTU: {client.mtu_size} bytes")
-            await client.request_mtu(512)          # Ask for 512 bytes (safe max for most ESP32)
-            print(f"MTU negotiated to: {client.mtu_size} bytes")
-
-            json_str = json.dumps(data, ensure_ascii=False)
-            bytes_data = json_str.encode("utf-8")
-
-            # Use response=True for large writes (more reliable)
-            await client.write_gatt_char(CHAR_UUID, bytes_data, response=True)
-
-            print(f"✅ PUSH SUCCESS → {len(bytes_data)} bytes at {datetime.datetime.now().strftime('%H:%M:%S')}")
-            last_push_time = time.time()
-            return True
-
-    except Exception as e:
-        print(f"❌ BLE Write Failed: {type(e).__name__}: {e}")
-        if "MTU" in str(e) or "write" in str(e).lower():
-            print("   → Try placing ESP32 closer to computer or restart ESP32")
-        traceback.print_exc()
-        return False
-
-
-async def update_news():
-    global last_hash, last_push_time
-
+def update_news():
+    global current_data, last_hash
+    headlines = {}
     categories = {
-        "本港新聞": "https://rthk.hk/rthk/news/rss/c_expressnews_clocal.xml",
-        "內地新聞": "https://rthk.hk/rthk/news/rss/c_expressnews_greaterchina.xml",
-        "國際新聞": "https://rthk.hk/rthk/news/rss/c_expressnews_cinternational.xml",
-        "財經新聞": "https://rthk.hk/rthk/news/rss/c_expressnews_cfinance.xml"
+        "本港新聞":   "https://rthk.hk/rthk/news/rss/c_expressnews_clocal.xml",
+        "內地新聞":   "https://rthk.hk/rthk/news/rss/c_expressnews_greaterchina.xml",
+        "國際新聞":   "https://rthk.hk/rthk/news/rss/c_expressnews_cinternational.xml",
+        "財經新聞":   "https://rthk.hk/rthk/news/rss/c_expressnews_cfinance.xml"
     }
 
-    headlines = {label: fetch_rss(url) for label, url in categories.items()}
+    for label, url in categories.items():
+        titles = fetch_rss(url)
+        while len(titles) < 10:
+            titles.append("")
+        headlines[label] = titles
 
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # ──────────────────────── KEY FIX ────────────────────────
+    # Hash ONLY the headlines → timestamp no longer triggers a push
+    headlines_str = json.dumps(headlines, sort_keys=True, ensure_ascii=False)
+    current_hash = hashlib.sha256(headlines_str.encode('utf-8')).hexdigest()
+
     data = {"timestamp": timestamp, "headlines": headlines}
 
-    current_hash = hashlib.sha256(json.dumps(headlines, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
-
-    if last_hash is None or (last_hash != current_hash and time.time() - last_push_time > MIN_PUSH_INTERVAL):
-        print("📰 News changed → pushing via BLE...")
-        await push_to_esp32(data)
+    # Push only when real news changed or first boot
+    if last_hash is None or last_hash != current_hash:
+        print("News content changed or server startup → pushing to LED")
+        try:
+            r = requests.post(LED_URL, json=data, timeout=5)
+            print("Push OK" if r.status_code == 200 else f"Push failed {r.status_code}")
+        except Exception as e:
+            print("Push error:", e)
         last_hash = current_hash
-    else:
-        print(f"⏳ No change (debounce active)")
 
+    current_data = data
 
-async def main():
-    global last_hash, last_push_time
+def news_updater():
+    global last_hash
     last_hash = None
-    last_push_time = 0
-
-    print("🚀 BLE News Updater with MTU negotiation started.")
-    print("Press Ctrl+C to stop.\n")
-
     while True:
-        await update_news()
-        await asyncio.sleep(60)
+        update_news()
+        time.sleep(60)
 
+@app.route('/all_news')
+def all_news():
+    return jsonify(current_data)
 
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, asyncio.CancelledError):
-        print("\n👋 Stopped by user.")
-    except Exception as e:
-        print(f"Critical error: {e}")
-        traceback.print_exc()
+if __name__ == '__main__':
+    threading.Thread(target=news_updater, daemon=True).start()
+    app.run(host='0.0.0.0', port=5050)
