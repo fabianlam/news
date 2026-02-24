@@ -4,16 +4,16 @@ import time
 import threading
 import hashlib
 import feedparser
-import requests
-from flask import Flask, jsonify
+import bluetooth  # Requires pybluez: pip install pybluez
 
-app = Flask(__name__)
+ESP32_BT_MAC = "XX:XX:XX:XX:XX:XX"  # ← Replace with your ESP32's Bluetooth MAC address
+ESP32_BT_NAME = "LEDNewsDisplay"   # For discovery if needed
+RFCOMM_CHANNEL = 1                 # Standard serial channel
 
-LED_URL = "http://192.168.1.120/notify"        # ← change if you use mDNS
 current_data = {"status": "updating"}
-last_hash = None                               # Force push on first start
-last_push_time = 0                             # For debounce
-MIN_PUSH_INTERVAL = 300                        # 5 minutes in seconds
+last_hash = None  # Force push on first start
+last_push_time = 0  # For debounce
+MIN_PUSH_INTERVAL = 300  # 5 minutes in seconds
 
 def fetch_rss(url):
     feed = feedparser.parse(url)
@@ -23,37 +23,35 @@ def update_news():
     global current_data, last_hash, last_push_time
     headlines = {}
     categories = {
-        "本港新聞":   "https://rthk.hk/rthk/news/rss/c_expressnews_clocal.xml",
-        "內地新聞":   "https://rthk.hk/rthk/news/rss/c_expressnews_greaterchina.xml",
-        "國際新聞":   "https://rthk.hk/rthk/news/rss/c_expressnews_cinternational.xml",
-        "財經新聞":   "https://rthk.hk/rthk/news/rss/c_expressnews_cfinance.xml"
+        "本港新聞": "https://rthk.hk/rthk/news/rss/c_expressnews_clocal.xml",
+        "內地新聞": "https://rthk.hk/rthk/news/rss/c_expressnews_greaterchina.xml",
+        "國際新聞": "https://rthk.hk/rthk/news/rss/c_expressnews_cinternational.xml",
+        "財經新聞": "https://rthk.hk/rthk/news/rss/c_expressnews_cfinance.xml"
     }
-
     for label, url in categories.items():
         titles = fetch_rss(url)
         while len(titles) < 10:
             titles.append("")
         headlines[label] = titles
-
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
     # Hash ONLY the headlines → timestamp no longer triggers a push
     headlines_str = json.dumps(headlines, sort_keys=True, ensure_ascii=False)
     current_hash = hashlib.sha256(headlines_str.encode('utf-8')).hexdigest()
-
     data = {"timestamp": timestamp, "headlines": headlines}
-
     # Push only when real news changed or first boot, and at least MIN_PUSH_INTERVAL since last push
     if last_hash is None or (last_hash != current_hash and time.time() - last_push_time > MIN_PUSH_INTERVAL):
-        print("News content changed or server startup → pushing to LED")
+        print("News content changed or server startup → pushing to LED via Bluetooth")
         try:
-            r = requests.post(LED_URL, json=data, timeout=5)
-            print("Push OK" if r.status_code == 200 else f"Push failed {r.status_code}")
+            sock = bluetooth.BluetoothSocket(bluetooth.RFCOMM)
+            sock.connect((ESP32_BT_MAC, RFCOMM_CHANNEL))
+            json_str = json.dumps(data, ensure_ascii=False)  # Send as string
+            sock.send(json_str.encode('utf-8'))
+            sock.close()
+            print("Push OK")
             last_push_time = time.time()
         except Exception as e:
             print("Push error:", e)
         last_hash = current_hash
-
     current_data = data
 
 def news_updater():
@@ -64,10 +62,13 @@ def news_updater():
         update_news()
         time.sleep(60)  # Still check every minute, but push debounced
 
-@app.route('/all_news')
-def all_news():
-    return jsonify(current_data)
-
 if __name__ == '__main__':
-    threading.Thread(target=news_updater, daemon=True).start()
-    app.run(host='0.0.0.0', port=5050)
+    # Removed Flask since no HTTP needed anymore
+    news_updater_thread = threading.Thread(target=news_updater, daemon=True)
+    news_updater_thread.start()
+    print("News updater started. Press Ctrl+C to exit.")
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("Shutting down...")
