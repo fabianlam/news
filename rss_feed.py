@@ -5,18 +5,19 @@ import time
 import hashlib
 import feedparser
 import traceback
+import signal
 from bleak import BleakScanner, BleakClient
 from bleak.exc import BleakError, BleakDeviceNotFoundError
 
 # ==================== CONFIG ====================
-ESP32_MAC = "80:B5:4E:D7:14:25"          # ← Change only if your MAC is different
-ESP32_NAME = "LEDNewsDisplay"            # Device name from Arduino
+ESP32_MAC = "80:B5:4E:D7:14:25"          # ← Your ESP32 MAC
+ESP32_NAME = "LEDNewsDisplay"
 
 SERVICE_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
-CHAR_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8"   # Your write characteristic
+CHAR_UUID    = "beb5483e-36e1-4688-b7f5-ea07361b26a8"
 
 MIN_PUSH_INTERVAL = 300   # 5 minutes
-SCAN_TIMEOUT = 10         # seconds
+SCAN_TIMEOUT = 10
 # ===============================================
 
 last_hash = None
@@ -32,15 +33,13 @@ def fetch_rss(url: str):
 
 
 async def discover_device():
-    """Scan and find the ESP32 by MAC or name"""
-    print(f"🔍 Scanning for ESP32 ({ESP32_MAC} or name '{ESP32_NAME}')...")
+    print(f"🔍 Scanning for {ESP32_NAME} ({ESP32_MAC})...")
     devices = await BleakScanner.discover(timeout=SCAN_TIMEOUT)
-    
     for d in devices:
-        if d.address.upper() == ESP32_MAC.upper() or (d.name and ESP32_NAME in d.name):
-            print(f"✅ Found device: {d.name} | MAC: {d.address}")
+        if d.address.upper() == ESP32_MAC.upper() or (d.name and ESP32_NAME.lower() in (d.name or "").lower()):
+            print(f"✅ Found: {d.name} | {d.address}")
             return d
-    print("❌ ESP32 not found in scan. Check power, range, or MAC.")
+    print("❌ ESP32 not found. Check power / range / advertising.")
     return None
 
 
@@ -51,24 +50,17 @@ async def push_to_esp32(data: dict):
         return False
 
     try:
-        async with BleakClient(device) as client:   # Use discovered device object (most reliable)
+        async with BleakClient(device) as client:
             json_str = json.dumps(data, ensure_ascii=False)
-            bytes_data = json_str.encode("utf-8")
+            await client.write_gatt_char(CHAR_UUID, json_str.encode("utf-8"), response=False)
 
-            await client.write_gatt_char(CHAR_UUID, bytes_data, response=False)
-
-            print(f"✅ PUSH SUCCESS → {len(bytes_data)} bytes at {datetime.datetime.now().strftime('%H:%M:%S')}")
+            print(f"✅ PUSH SUCCESS → {len(json_str)} bytes at {datetime.datetime.now().strftime('%H:%M:%S')}")
             last_push_time = time.time()
             return True
 
-    except BleakDeviceNotFoundError:
-        print("❌ Device not reachable (out of range or not advertising)")
-    except BleakError as e:
-        print(f"❌ BleakError: {e}")
     except Exception as e:
-        print(f"❌ Unexpected error: {type(e).__name__}: {e}")
-        traceback.print_exc()
-    return False
+        print(f"❌ BLE Push Failed: {type(e).__name__}: {e}")
+        return False
 
 
 async def update_news():
@@ -86,18 +78,12 @@ async def update_news():
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     data = {"timestamp": timestamp, "headlines": headlines}
 
-    headlines_str = json.dumps(headlines, sort_keys=True, ensure_ascii=False)
-    current_hash = hashlib.sha256(headlines_str.encode('utf-8')).hexdigest()
+    current_hash = hashlib.sha256(json.dumps(headlines, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
-    if (last_hash is None or 
-        (last_hash != current_hash and time.time() - last_push_time > MIN_PUSH_INTERVAL)):
-        
-        print("📰 News changed → attempting BLE push...")
-        success = await push_to_esp32(data)
-        if success:
-            last_hash = current_hash
-    else:
-        print(f"⏳ No change or debounce active ({int(time.time() - last_push_time)}s since last push)")
+    if last_hash is None or (last_hash != current_hash and time.time() - last_push_time > MIN_PUSH_INTERVAL):
+        print("📰 News changed → pushing via BLE...")
+        await push_to_esp32(data)
+        last_hash = current_hash
 
 
 async def main():
@@ -105,19 +91,28 @@ async def main():
     last_hash = None
     last_push_time = 0
 
-    print("🚀 BLE News Updater (with discovery + full error logging) started.")
-    print("Press Ctrl+C to stop.\n")
+    print("🚀 BLE News Updater started (robust version). Press Ctrl+C to stop.\n")
 
-    while True:
-        await update_news()
-        await asyncio.sleep(60)
+    try:
+        while True:
+            await update_news()
+            await asyncio.sleep(60)
+    except (KeyboardInterrupt, asyncio.CancelledError, EOFError):
+        print("\n\n👋 Shutting down gracefully...")
+    except Exception as e:
+        print(f"\n💥 Unexpected error: {e}")
+        traceback.print_exc()
+    finally:
+        print("Goodbye!")
 
 
 if __name__ == "__main__":
+    # Handle Ctrl+C cleanly on all platforms
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\n👋 Stopped by user.")
-    except Exception as e:
-        print(f"Critical crash: {e}")
-        traceback.print_exc()
+        loop.run_until_complete(main())
+    except (KeyboardInterrupt, EOFError):
+        print("\n👋 Stopped.")
+    finally:
+        loop.close()
