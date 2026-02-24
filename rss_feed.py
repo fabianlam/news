@@ -1,21 +1,21 @@
 import asyncio
 import json
 import datetime
+import time
 import hashlib
 import feedparser
 from bleak import BleakClient
 
 # ==================== CONFIG ====================
-ESP32_BLE_ADDRESS = "80:B5:4E:D7:14:25"   # Your ESP32 MAC address
+ESP32_BLE_ADDRESS = "80:B5:4E:D7:14:25"   # ← Your ESP32 MAC
 
-# Nordic UART Service (NUS) - standard for ESP32 BLE serial
-NUS_SERVICE_UUID = "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
-NUS_RX_CHAR_UUID = "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"   # Write to this (Python → ESP32)
+# === EXACT UUIDs FROM YOUR ARDUINO CODE ===
+SERVICE_UUID        = "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
+CHARACTERISTIC_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8"  # This is the write target
 
 MIN_PUSH_INTERVAL = 300   # 5 minutes debounce
 # ===============================================
 
-current_data = {"status": "updating"}
 last_hash = None
 last_push_time = 0
 
@@ -29,31 +29,30 @@ def fetch_rss(url: str):
 
 
 async def push_to_esp32(data: dict):
-    """Send JSON via BLE to ESP32 NUS RX characteristic"""
+    """Send JSON to your custom characteristic"""
     global last_push_time
     try:
         async with BleakClient(ESP32_BLE_ADDRESS) as client:
-            if not await client.is_connected():
-                print("❌ Failed to connect to ESP32 via BLE")
-                return False
-
             json_str = json.dumps(data, ensure_ascii=False)
+            bytes_data = json_str.encode("utf-8")
+
             await client.write_gatt_char(
-                NUS_RX_CHAR_UUID,
-                json_str.encode("utf-8"),
-                response=False   # faster, no ACK needed for this use case
+                CHARACTERISTIC_UUID, 
+                bytes_data, 
+                response=False   # Faster, no response needed
             )
-            print(f"✅ Pushed {len(json_str)} bytes to ESP32 via BLE at {datetime.datetime.now().strftime('%H:%M:%S')}")
+
+            print(f"✅ PUSH SUCCESS → {len(bytes_data)} bytes sent at {datetime.datetime.now().strftime('%H:%M:%S')}")
             last_push_time = time.time()
             return True
 
     except Exception as e:
-        print(f"❌ BLE push error: {e}")
+        print(f"❌ BLE Push Error: {e}")
         return False
 
 
 async def update_news():
-    global current_data, last_hash, last_push_time
+    global last_hash, last_push_time
 
     categories = {
         "本港新聞": "https://rthk.hk/rthk/news/rss/c_expressnews_clocal.xml",
@@ -64,26 +63,24 @@ async def update_news():
 
     headlines = {}
     for label, url in categories.items():
-        titles = fetch_rss(url)
-        headlines[label] = titles
+        headlines[label] = fetch_rss(url)
 
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     data = {"timestamp": timestamp, "headlines": headlines}
 
-    # Hash ONLY the headlines content (timestamp ignored for change detection)
+    # Hash only the content (ignore timestamp)
     headlines_str = json.dumps(headlines, sort_keys=True, ensure_ascii=False)
     current_hash = hashlib.sha256(headlines_str.encode('utf-8')).hexdigest()
 
-    # Push only on real content change or first run, and respect debounce
     if (last_hash is None or 
         (last_hash != current_hash and time.time() - last_push_time > MIN_PUSH_INTERVAL)):
         
-        print("📰 News content changed → pushing to ESP32 via BLE")
+        print("📰 News changed → pushing via BLE...")
         success = await push_to_esp32(data)
         if success:
             last_hash = current_hash
 
-    current_data = data
+    print(f"Next check in 60 seconds... (last push was {int(time.time() - last_push_time)}s ago)")
 
 
 async def main():
@@ -91,11 +88,11 @@ async def main():
     last_hash = None
     last_push_time = 0
 
-    print("🚀 BLE News updater started (using Bleak). Press Ctrl+C to exit.")
+    print("🚀 BLE News Updater started (custom UUIDs). Press Ctrl+C to exit.")
 
     while True:
         await update_news()
-        await asyncio.sleep(60)   # Check every minute, push is debounced
+        await asyncio.sleep(60)   # Check every minute
 
 
 if __name__ == "__main__":
