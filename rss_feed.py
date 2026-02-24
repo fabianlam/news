@@ -6,7 +6,7 @@ import hashlib
 import feedparser
 import bluetooth  # Requires pybluez: pip install pybluez
 
-ESP32_BT_MAC = "XX:XX:XX:XX:XX:XX"  # ← Replace with your ESP32's Bluetooth MAC address
+ESP32_BT_MAC = "80:B5:4E:D6:F9:51"  # ← Replace with your ESP32's Bluetooth MAC address
 ESP32_BT_NAME = "LEDNewsDisplay"   # For discovery if needed
 RFCOMM_CHANNEL = 1                 # Standard serial channel
 
@@ -72,3 +72,4 @@ if __name__ == '__main__':
             time.sleep(1)
     except KeyboardInterrupt:
         print("Shutting down...")
+
